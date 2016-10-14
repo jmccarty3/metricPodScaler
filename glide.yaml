@@ -6,6 +6,7 @@ import:
 - package: gopkg.in/yaml.v2
 - package: github.com/go-ini/ini
 - package: github.com/jmespath/go-jmespath
+- package: golang.org/x/net/
 - package: github.com/golang/glog
   version: 44145f04b68cf362d9c4df2182967c2275eaefed
 - package: github.com/aws/aws-sdk-go
