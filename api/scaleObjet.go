@@ -12,7 +12,6 @@ const defaultWaitPeriod = 30
 
 //Init performs initializaion work
 func (scale *ScaleObject) Init(masterURL, configFile string) {
-	//TODO Support more than just in cluster
 	config, err := clientcmd.BuildConfigFromFlags(masterURL, configFile)
 	if err != nil {
 		glog.Exit(err)
@@ -50,6 +49,7 @@ func (scale *ScaleObject) Scale(newSize int32) {
 	s.Spec.Replicas = newSize
 	scale.k8sClient.Scales(scale.Namespace).Update(scale.Kind, s)
 	glog.Infof("Scaled %s to %d", scale.Name, newSize)
+
 	for scale.CurrentCount() != newSize {
 		glog.V(2).Info("Waiting for scale to finish")
 		time.Sleep(defaultWaitPeriod * time.Second)

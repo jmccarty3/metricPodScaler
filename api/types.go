@@ -26,12 +26,19 @@ type scaleFunc func() (bool, error)
 
 //Scaler reprsents an object to be scaled
 type Scaler struct {
-	Object          ScaleObject
-	TimeStepSeconds int32
-	StepQuantity    int64
-	MaxReplicas     int32
-	Provider        providers.Provider
+	Object            ScaleObject
+	ScaleDelaySeconds int32
+	TargetValue       int64
+	MaxReplicas       int32
+	MinReplicas       int32
+	Provider          providers.Provider
 
-	lastScaledTime time.Time
-	scalers        []scaleFunc
+	delayDuration       time.Duration
+	lastScaledTime      time.Time
+	lastMeasuredValue   int64
+	currentValue        int64
+	lastMeasuredTime    time.Time
+	currentMeasuredTime time.Time
+
+	scalers []scaleFunc
 }

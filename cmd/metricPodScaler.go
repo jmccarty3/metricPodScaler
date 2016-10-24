@@ -41,7 +41,8 @@ func main() {
 		panic(fmt.Sprintf("Error parsing config file. %v", err))
 	}
 
-	for _, scaler := range config.Scalers {
+	for index := range config.Scalers {
+		scaler := config.Scalers[index]
 		scaler.Init(config.MasterURL, config.KubeConfig)
 		if err := scaler.Provider.Connect(); err != nil {
 			panic(fmt.Sprintf("Scaler: %s Error connecting to Provider: %v", scaler.Object.Name, err))

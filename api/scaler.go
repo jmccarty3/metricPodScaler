@@ -19,21 +19,63 @@ const DefaultThresholdPercent = .10
 //Init initializes the scaler object
 //TODO Consider just passing a client object
 func (s *Scaler) Init(masterURL, kubeConfig string) {
+	s.delayDuration = time.Duration(s.ScaleDelaySeconds) * time.Second
 	s.Object.Init(masterURL, kubeConfig)
 }
 
 //Run main control loop for scaler
 func (s *Scaler) Run() {
-	s.scalers = []scaleFunc{s.scaleByValue, s.scaleByTime}
 	s.lastScaledTime = time.Now()
-
+	s.updateValues() // Get initial values
 	for {
+		time.Sleep(s.delayDuration) //Take a breather
 		if s.Object.Exists() {
+			if s.updateValues() != nil {
+				continue
+			}
 			s.work()
 		}
-
-		time.Sleep(DefaultCooldown * time.Second) //Take a breather
 	}
+}
+
+func (s *Scaler) updateValues() error {
+	val, err := s.Provider.CurrentCount()
+	if err != nil {
+		glog.Errorf("Could not update values: %v", err)
+		return err
+	}
+	s.lastMeasuredTime = s.currentMeasuredTime
+	s.lastMeasuredValue = s.currentValue
+	s.currentValue = val
+	s.currentMeasuredTime = time.Now()
+
+	glog.V(4).Infof("Last Time/Value: %v/%v  Current Time/Value: %v/%v", s.lastMeasuredTime, s.lastMeasuredValue, s.currentMeasuredTime, s.currentValue)
+	return nil
+}
+
+func (s *Scaler) getPods() int32 {
+	currentPods := s.Object.CurrentCount()
+	d := calcDelta(s.lastMeasuredValue, s.currentValue,
+		s.lastMeasuredTime, s.currentMeasuredTime)
+
+	targetTimeSecs := estimateTargetTime(s.currentValue, s.TargetValue, d)
+	deltaPerPod := perPodDelta(d, currentPods)
+	goalDelta := calcDelta(s.lastMeasuredValue, s.TargetValue, s.lastMeasuredTime, time.Now().Add(60*time.Second))
+	newPodCount := calcNeededPods(currentPods, goalDelta, deltaPerPod)
+	glog.V(4).Infof("Time Diff: %v", s.currentMeasuredTime.Sub(s.lastMeasuredTime).Seconds())
+	glog.V(4).Infof("Current Pods: %d", currentPods)
+	glog.V(4).Infof("Delta: %v", d)
+	glog.V(4).Infof("Intercept time estimate: %v seconds", targetTimeSecs)
+	glog.V(4).Infof("PerPodDelta: %v", deltaPerPod)
+	glog.V(4).Infof("Needed Delta: %v", goalDelta)
+
+	if targetTimeSecs > 0 && targetTimeSecs <= s.delayDuration {
+		glog.V(2).Info("Intercept time is within threshold. Do nothing")
+		return currentPods
+	}
+
+	glog.V(4).Infof("Current Pods: %d Desired Pods: %v", currentPods, newPodCount)
+	return newPodCount
 }
 
 func inThreshold(target, quantity int64, thresholdPercent float64) bool {
@@ -43,19 +85,7 @@ func inThreshold(target, quantity int64, thresholdPercent float64) bool {
 	return quantity > min && quantity < max
 }
 
-func (s *Scaler) inThreshold(quantity int64) bool {
-	baseLimit := int64(s.Object.CurrentCount()) * s.StepQuantity
-	percentage := int64(float32(baseLimit) * DefaultThresholdPercent)
-
-	if quantity > (percentage + baseLimit) {
-		return false
-	}
-	if quantity < (baseLimit - percentage) {
-		return false
-	}
-	return true
-}
-
+/*
 func (s *Scaler) scaleByValue() (bool, error) {
 	currentCount, err := s.Provider.CurrentCount()
 	if err != nil {
@@ -81,18 +111,10 @@ func (s *Scaler) scaleByTime() (bool, error) {
 	glog.V(2).Info("Time threshold crossed. Scaling.")
 	return s.scale(s.Object.CurrentCount() + 1), nil
 }
+*/
 
 func (s *Scaler) work() {
-	for _, scaler := range s.scalers {
-		scaled, err := scaler()
-
-		if scaled {
-			return
-		}
-		if err != nil {
-			glog.Errorf("Could not scale: %v", err)
-		}
-	}
+	s.scale(s.getPods())
 }
 
 func (s *Scaler) scale(desiredSize int32) bool {
@@ -102,6 +124,10 @@ func (s *Scaler) scale(desiredSize int32) bool {
 	if desiredSize >= s.MaxReplicas {
 		glog.V(4).Info("Desired size greater then max. Setting to max")
 		desiredSize = s.MaxReplicas
+	}
+
+	if desiredSize < s.MinReplicas {
+		glog.V(4).Info("Desired size less then min. Setting to min.")
 	}
 
 	if desiredSize == currentObjects {
@@ -115,16 +141,19 @@ func (s *Scaler) scale(desiredSize int32) bool {
 }
 
 type scalerYaml struct {
-	Object          ScaleObject
-	TimeStepSeconds int32 `yaml:"timeStepSeconds"`
-	StepQuantity    int64 `yaml:"stepQuantity"`
-	MaxReplicas     int32 `yaml:"maxReplicas"`
-	Provider        map[string]interface{}
+	Object            ScaleObject
+	ScaleDelaySeconds int32 `yaml:"scaleDelaySeconds"`
+	TargetValue       int64 `yaml:"targetValue"`
+	MaxReplicas       int32 `yaml:"maxReplicas"`
+	MinReplicas       int32 `yaml:"minReplicas"`
+	Provider          map[string]interface{}
 }
 
 //UnmarshalYAML performs custom unmarshalling
 func (s *Scaler) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	in := &scalerYaml{}
+	in := &scalerYaml{
+		ScaleDelaySeconds: DefaultCooldown,
+	}
 
 	if err := unmarshal(&in); err != nil {
 		return err
@@ -132,18 +161,18 @@ func (s *Scaler) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	var q providers.Provider
 	for k, v := range in.Provider {
+		glog.Info(providers.Providers)
 		q = providers.Providers[k]()
 		reMarsh, _ := yaml.Marshal(v)
 		if err := yaml.Unmarshal(reMarsh, q); err != nil {
 			return err
 		}
 	}
-	glog.Infof("%v", in.Object)
-	glog.Info(in)
+
 	s.Object = in.Object
-	s.TimeStepSeconds = in.TimeStepSeconds
-	s.StepQuantity = in.StepQuantity
+	s.ScaleDelaySeconds = in.ScaleDelaySeconds
 	s.MaxReplicas = in.MaxReplicas
+	s.MinReplicas = in.MinReplicas
 	s.Provider = q
 	return nil
 }
